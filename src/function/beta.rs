@@ -921,7 +921,15 @@ mod tests {
 
     #[test]
     fn test_inv_beta_reg_extreme_shape_ratio() {
-        assert_eq!(inv_beta_reg(1e20, 10.0, 0.3), 1.0);
+        for b in [10.0, f64::from_bits(10.0_f64.to_bits() - 1), 1.0, 0.1] {
+            assert_eq!(try_inv_beta_reg(1e20, b, 0.3), Ok(1.0), "b={b}");
+        }
+    }
+
+    #[test]
+    fn test_inv_beta_reg_near_one_rounds_down() {
+        let predecessor = f64::from_bits(1.0_f64.to_bits() - 1);
+        assert_eq!(try_inv_beta_reg(1e18, 1.0, 1e-40), Ok(predecessor));
     }
 
     #[test]

@@ -208,6 +208,10 @@ pub(super) fn try_inv_beta_reg(a: f64, b: f64, probability: f64) -> Result<f64, 
         return Ok(0.5);
     }
     if probability <= 0.5 {
+        let midpoint_below_one = f64::EPSILON / 4.0;
+        if b < probability * a * midpoint_below_one {
+            return Ok(1.0);
+        }
         return solve_lower_tail(a, b, probability);
     }
 
