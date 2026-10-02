@@ -7,6 +7,7 @@ mod inverse;
 mod large_params;
 mod temme;
 
+use crate::consts;
 use crate::function::{double_double, gamma};
 use crate::prec;
 #[cfg(not(feature = "std"))]
@@ -260,6 +261,43 @@ fn beta_reg_from_fraction(log_prefactor: (f64, f64), fraction: f64, a: f64) -> f
     double_double::exp(double_double::add(log_prefactor, (log_quotient, 0.0)))
 }
 
+fn gamma_upper_tail_with_beta_correction(a: f64, b: f64, x: f64) -> Result<f64, BetaFuncError> {
+    if x == 0.0 {
+        return Ok(1.0);
+    }
+    let z = b * x;
+    let mut gamma_tail =
+        gamma::checked_gamma_ur(a, z).map_err(|_| BetaFuncError::ConvergenceFailed)?;
+    if gamma_tail == 0.0 {
+        return Ok(0.0);
+    }
+    let log_density_term = if a >= 1e4 && z > a {
+        let ratio = (z - a) / a;
+        let logarithm = double_double::add(
+            double_double::accurate_ln_one_plus((ratio, 0.0)),
+            (-ratio, 0.0),
+        );
+        let deviance = double_double::multiply((a, 0.0), logarithm);
+        let stable = deviance.0 + deviance.1 + 0.5 * a.ln()
+            - consts::LN_SQRT_2PI
+            - large_params::stirling_correction(a);
+        let ordinary = a * z.ln() - z - gamma::ln_gamma(a);
+        gamma_tail *= (stable - ordinary).exp();
+        stable
+    } else {
+        a * z.ln() - z - gamma::ln_gamma(a)
+    };
+    let density_term = log_density_term.exp();
+    let beta_correction = density_term * (1.0 - a - z) / (2.0 * b);
+    Ok(gamma_tail + beta_correction)
+}
+
+fn beta_gamma_limit_applicable(a: f64, b: f64) -> bool {
+    a.is_finite()
+        && b.is_finite()
+        && ((a <= 10.0 && b >= 1e8) || (a <= 1e8 && b >= 1e12 && a <= b * 1e-8))
+}
+
 /// Computes the regularized lower incomplete beta function
 /// `I_x(a,b) = 1/Beta(a,b) * int(t^(a-1)*(1-t)^(b-1), t=0..x)`
 /// `a > 0`, `b > 0`, `1 >= x >= 0` where `a` is the first beta parameter,
@@ -303,6 +341,19 @@ pub fn checked_beta_reg(a: f64, b: f64, x: f64) -> Result<f64, BetaFuncError> {
         return Ok(-(b * (-x).ln_1p()).exp_m1());
     }
 
+    let scaled_x = b * x;
+    if beta_gamma_limit_applicable(a, b) && scaled_x.is_finite() && scaled_x >= a {
+        return gamma_upper_tail_with_beta_correction(a, b, x).map(|tail| 1.0 - tail);
+    }
+    if a.is_finite()
+        && b.is_finite()
+        && scaled_x > 0.0
+        && scaled_x.is_finite()
+        && (a + scaled_x).powi(2) < b * 256.0 * f64::EPSILON
+    {
+        return gamma::checked_gamma_lr(a, scaled_x).map_err(|_| BetaFuncError::ConvergenceFailed);
+    }
+
     let log_prefactor = match large_params::log_prefactor(a, b, x) {
         Some(large_params::LogPrefactor::Value(logarithm)) => logarithm,
         Some(large_params::LogPrefactor::Underflow) => {
@@ -312,15 +363,19 @@ pub fn checked_beta_reg(a: f64, b: f64, x: f64) -> Result<f64, BetaFuncError> {
                 0.0
             });
         }
-        None => (
-            gamma::ln_gamma(a + b) - gamma::ln_gamma(a) - gamma::ln_gamma(b)
-                + a * x.ln()
-                + b * (-x).ln_1p(),
-            0.0,
-        ),
+        None => {
+            let logarithm = if a.min(b) < 10.0 && a.max(b) >= 1e8 {
+                a * x.ln() + b * (-x).ln_1p() - inverse::inverse_log_beta(a, b)
+            } else {
+                gamma::ln_gamma(a + b) - gamma::ln_gamma(a) - gamma::ln_gamma(b)
+                    + a * x.ln()
+                    + b * (-x).ln_1p()
+            };
+            (logarithm, 0.0)
+        }
     };
 
-    if !beta_reg_use_complement(a, b, x) {
+    if !beta_reg_use_complement(a, b, x) || 1.0 - x == 1.0 {
         let fraction = beta_continued_fraction(a, b, x)?;
         return Ok(beta_reg_from_fraction(log_prefactor, fraction, a));
     }
@@ -930,6 +985,61 @@ mod tests {
     fn test_inv_beta_reg_near_one_rounds_down() {
         let predecessor = f64::from_bits(1.0_f64.to_bits() - 1);
         assert_eq!(try_inv_beta_reg(1e18, 1.0, 1e-40), Ok(predecessor));
+        for probability in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            assert_eq!(
+                try_inv_beta_reg(1e20, 1e4, probability),
+                Ok(predecessor),
+                "probability={probability}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inv_beta_reg_reflected_extreme_shape_ratio() {
+        for probability in [0.3_f64, 0.5, 0.7, 0.9] {
+            let quantile = try_inv_beta_reg(1.0, 1e20, probability).unwrap();
+            let expected = -((-probability).ln_1p() / 1e20).exp_m1();
+            assert!(
+                (quantile - expected).abs() / expected < 1e-12,
+                "probability={probability}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inv_beta_reg_extreme_upper_tail() {
+        for (a, b, probability, expected) in [
+            (0.1, 1e8, 0.999999999999, 2.2537045339873085e-7),
+            (10.0, 1e12, 0.999999999999, 5.0279911304539532e-11),
+            (1e4, 1e12, 0.9, 1.0128367271745492e-8),
+            (1e4, 1e20, 0.9, 1.0128367373674175e-16),
+            (1e8, 1e20, 0.9, 1.0001281572966115e-12),
+            (0.1, 1e16, 0.99999999, 1.3749411338153721e-15),
+            (0.1, 1e20, 0.999999999999, 2.2537047778048814e-19),
+            (10.0, 1e16, 0.999999999999, 5.027991130602968e-15),
+        ] {
+            let actual = try_inv_beta_reg(a, b, probability).unwrap();
+            assert!(
+                (actual - expected).abs() / expected < 1e-12,
+                "a={a}, b={b}, probability={probability}, actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_beta_reg_extreme_shape_ratio_upper_tail() {
+        assert_eq!(checked_beta_reg(1e4, 1e20, 0.5), Ok(1.0));
+        for (a, b, x, expected) in [
+            (1e4, 1e12, 1.0128367271745492e-8, 0.9),
+            (1e4, 1e20, 1.0128367373674175e-16, 0.9),
+            (1e8, 1e20, 1.0001281572966115e-12, 0.9),
+        ] {
+            let actual = checked_beta_reg(a, b, x).unwrap();
+            assert!(
+                (actual - expected).abs() < 1e-11,
+                "a={a}, b={b}, x={x}, actual={actual}, expected={expected}"
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::{
-    BetaFuncError, beta_continued_fraction, beta_reg_use_complement, checked_beta_reg,
+    BetaFuncError, beta_continued_fraction, beta_gamma_limit_applicable, beta_reg_use_complement,
+    checked_beta_reg, gamma_upper_tail_with_beta_correction,
     large_params::{self, LogPrefactor},
     ln_beta,
 };
@@ -74,7 +75,7 @@ fn closest_representable(
     Ok(best)
 }
 
-fn inverse_log_beta(a: f64, b: f64) -> f64 {
+pub(super) fn inverse_log_beta(a: f64, b: f64) -> f64 {
     if b == 1.0 {
         return -a.ln();
     }
@@ -187,6 +188,33 @@ fn solve_lower_tail(a: f64, b: f64, probability: f64) -> Result<f64, BetaFuncErr
     Err(BetaFuncError::ConvergenceFailed)
 }
 
+fn solve_gamma_upper_tail(a: f64, b: f64, probability: f64) -> Result<f64, BetaFuncError> {
+    let log_tail = (-probability).ln_1p();
+    let mut lower = 0.0;
+    let mut upper = 1.0 / b;
+    while gamma_upper_tail_with_beta_correction(a, b, upper)?.ln() > log_tail {
+        lower = upper;
+        upper *= 2.0;
+    }
+
+    while let Some(midpoint) = representable_midpoint(lower, upper) {
+        let log_survival = gamma_upper_tail_with_beta_correction(a, b, midpoint)?.ln();
+        if log_survival > log_tail {
+            lower = midpoint;
+        } else {
+            upper = midpoint;
+        }
+    }
+
+    let lower_error = (gamma_upper_tail_with_beta_correction(a, b, lower)?.ln() - log_tail).abs();
+    let upper_error = (gamma_upper_tail_with_beta_correction(a, b, upper)?.ln() - log_tail).abs();
+    Ok(if lower_error <= upper_error {
+        lower
+    } else {
+        upper
+    })
+}
+
 pub(super) fn try_inv_beta_reg(a: f64, b: f64, probability: f64) -> Result<f64, BetaFuncError> {
     if !a.is_finite() || a <= 0.0 {
         return Err(BetaFuncError::ANotGreaterThanZero);
@@ -207,10 +235,26 @@ pub(super) fn try_inv_beta_reg(a: f64, b: f64, probability: f64) -> Result<f64, 
     if probability == 0.5 && a == b {
         return Ok(0.5);
     }
+    if a == 1.0 {
+        return Ok(-((-probability).ln_1p() / b).exp_m1());
+    }
     if probability <= 0.5 {
         let midpoint_below_one = f64::EPSILON / 4.0;
         if b < probability * a * midpoint_below_one {
             return Ok(1.0);
+        }
+        let reflected_probability = 1.0 - probability;
+        if probability > f64::EPSILON.sqrt()
+            && b < probability * a * f64::EPSILON.sqrt()
+            && reflected_probability < 1.0
+        {
+            return solve_lower_tail(b, a, reflected_probability).map(|value| 1.0 - value);
+        }
+        return solve_lower_tail(a, b, probability);
+    }
+    if a < b * f64::EPSILON.sqrt() {
+        if beta_gamma_limit_applicable(a, b) {
+            return solve_gamma_upper_tail(a, b, probability);
         }
         return solve_lower_tail(a, b, probability);
     }
