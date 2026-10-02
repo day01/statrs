@@ -995,6 +995,20 @@ mod tests {
     }
 
     #[test]
+    fn test_inv_beta_reg_extreme_endpoint_and_median() {
+        for b in [0.1, 1.0] {
+            for probability in [1e-12, 1e-8] {
+                assert_eq!(try_inv_beta_reg(1e20, b, probability), Ok(1.0));
+            }
+        }
+        for (a, b) in [(1e16, 1e20), (1e20, 1e16)] {
+            let expected = a / (a + b);
+            let actual = try_inv_beta_reg(a, b, 0.5).unwrap();
+            assert!((actual - expected).abs() <= 2.0 * f64::EPSILON * expected);
+        }
+    }
+
+    #[test]
     fn test_inv_beta_reg_reflected_extreme_shape_ratio() {
         for probability in [0.3_f64, 0.5, 0.7, 0.9] {
             let quantile = try_inv_beta_reg(1.0, 1e20, probability).unwrap();

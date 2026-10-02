@@ -235,8 +235,20 @@ pub(super) fn try_inv_beta_reg(a: f64, b: f64, probability: f64) -> Result<f64, 
     if probability == 0.5 && a == b {
         return Ok(0.5);
     }
+    if probability == 0.5 && a.min(b) >= 1e16 {
+        let scale = a.max(b);
+        let scaled_a = a / scale;
+        let scaled_b = b / scale;
+        let sum = scaled_a + scaled_b;
+        let mean = scaled_a / sum;
+        let median_correction = ((scaled_a - scaled_b) / (3.0 * sum * sum)) / scale;
+        return Ok(mean + median_correction);
+    }
     if a == 1.0 {
         return Ok(-((-probability).ln_1p() / b).exp_m1());
+    }
+    if b == 1.0 {
+        return Ok((probability.ln() / a).exp());
     }
     if probability <= 0.5 {
         let midpoint_below_one = f64::EPSILON / 4.0;
@@ -244,11 +256,16 @@ pub(super) fn try_inv_beta_reg(a: f64, b: f64, probability: f64) -> Result<f64, 
             return Ok(1.0);
         }
         let reflected_probability = 1.0 - probability;
-        if probability > f64::EPSILON.sqrt()
-            && b < probability * a * f64::EPSILON.sqrt()
-            && reflected_probability < 1.0
-        {
-            return solve_lower_tail(b, a, reflected_probability).map(|value| 1.0 - value);
+        if b < probability * a * f64::EPSILON.sqrt() {
+            if reflected_probability == 1.0 {
+                return Ok(1.0);
+            }
+            let value = if beta_gamma_limit_applicable(b, a) {
+                solve_gamma_upper_tail(b, a, reflected_probability)?
+            } else {
+                solve_lower_tail(b, a, reflected_probability)?
+            };
+            return Ok(1.0 - value);
         }
         return solve_lower_tail(a, b, probability);
     }
